@@ -1,0 +1,15 @@
+{
+  "name": "local-ai-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local coding agent: chat UI + file/shell tools running on your machine",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "MOCK=1 node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
