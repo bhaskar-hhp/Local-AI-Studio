@@ -13,6 +13,31 @@ browser (public/)  ─┐             node server.js                 model provi
 
 There is no cloud component and no database. Everything lives on localhost.
 
+## How to start
+
+**Prerequisite:** Node.js ≥ 18 (check with `node -v`). No `npm install` needed —
+there are zero runtime dependencies.
+
+Choose your interface:
+
+```bash
+cd Local-AI-Studio
+
+# Browser UI (offline demo, no key)
+npm run dev                          # MOCK=1 → http://127.0.0.1:4317
+
+# Browser UI with a real model
+PROVIDER_KEY=nvapi-... npm start
+
+# Terminal only — headless / no browser
+npm run cli -- --mock                # interactive demo, no key
+npm run cli -- --key nvapi-...       # save the key once, then chat
+npm run cli -- --yes "create hello.txt"   # one task, then exit
+```
+
+Then ask *“create a file called hello.txt”* to watch the full approve → write →
+reply loop.
+
 ## Quick start
 
 ```bash
