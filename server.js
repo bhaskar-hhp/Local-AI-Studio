@@ -305,8 +305,13 @@ class ToolParser {
       } else {
         const j = this.buf.indexOf("```");
         if (j === -1) {
-          this.toolBuf += this.buf;
-          this.buf = "";
+          // hold back up to two backticks that may start the closing fence
+          const keep = longestSuffixPrefix(this.buf, "```");
+          const cut = this.buf.length - keep;
+          if (cut > 0) {
+            this.toolBuf += this.buf.slice(0, cut);
+            this.buf = this.buf.slice(cut);
+          }
           break;
         }
         this.toolBuf += this.buf.slice(0, j);
@@ -401,16 +406,37 @@ function sse(res) {
 function mockChunks(messages) {
   const last = [...messages].reverse().find((m) => m.role === "user");
   const text = String(last?.content || "");
-  const toolResult = /^TOOL RESULT/.test(text.trim());
-  const wantsFile = /(create|write|make|save).*(file|hello|note)/i.test(text);
+  const trimmed = text.trim();
 
-  if (toolResult) return ["The file is in place. Open `hello.txt` to see it."];
+  // Follow-up after a tool ran: report what happened instead of repeating it.
+  const result = trimmed.match(/^TOOL RESULT\s+(\w+):\s*\n?([\s\S]*)$/);
+  if (result) {
+    const [, name, raw] = result;
+    const wrote = raw.match(/wrote \d+ bytes to (.+)/);
+    if (wrote) return [`Done. \`${wrote[1].trim()}\` is written.`];
+    const first = raw.trim().split("\n")[0] || "ok";
+    return [`Done — ${name}: ${first}`];
+  }
+
+  // Write request: honour a real filename and any "with …" content.
+  const wantsFile = /(create|write|make|save|add)\b/i.test(text) && /\bfile\b/i.test(text);
   if (wantsFile) {
+    const file = text.match(
+      /([\w./-]+\.(?:txt|md|js|mjs|cjs|ts|jsx|tsx|py|json|html|css|sh|go|rs|java|c|cpp|rb|yml|yaml))/i,
+    );
+    const filePath = file ? file[1] : "hello.txt";
+    let content = "hello world\n";
+    const withMatch = text.match(/\b(?:with|containing|that says|saying)\s+["'`]?([^"'`]+?)["'`]?\s*$/i);
+    if (withMatch && withMatch[1].trim()) content = withMatch[1].trim() + "\n";
     return [
-      "I'll write that file for you.\n\n",
-      '```tool\n{"name":"write_file","arguments":{"path":"hello.txt","content":"hello world\\n"}}\n```',
+      `I'll write \`${filePath}\` for you.\n\n`,
+      "```tool\n" + JSON.stringify({
+        name: "write_file",
+        arguments: { path: filePath, content },
+      }) + "\n```",
     ];
   }
+
   return [`(mock) I received: ${text.slice(0, 200) || "nothing"}`];
 }
 

@@ -1,14 +1,14 @@
 # Local AI Studio
 
-A coding agent that runs on **your** machine. Chat in the browser; the agent
-reads files, writes code and runs commands inside a workspace folder — and asks
-for your approval before every action.
+A coding agent that runs on **your** machine. Chat in the browser or straight
+from a terminal; the agent reads files, writes code and runs commands inside a
+workspace folder — and asks for your approval before every action.
 
 ```
-browser (public/)              node server.js                 model provider
- chat + tool approval  ──────►  /api/chat  (SSE)  ────────────►  NVIDIA NIM
- file tree / preview   ◄──────  /api/tool  (read, write, shell)   or any
-                                workspace/  (the only folder)     OpenAI-compatible API
+browser (public/)  ─┐             node server.js                 model provider
+                    ├──────────►  /api/chat  (SSE)  ──────────►  NVIDIA NIM
+ terminal (cli.js) ─┘             /api/tool  (read, write, shell)  or any
+                                  workspace/  (the only folder)     OpenAI-compatible API
 ```
 
 There is no cloud component and no database. Everything lives on localhost.
@@ -36,6 +36,54 @@ npm run dev        # MOCK=1
 
 Then ask *“create a file called hello.txt”* to watch the full approve → write →
 reply loop.
+
+## Terminal client (CLI)
+
+No browser needed. `cli.js` drives the same agent over the local API, and starts
+the server itself when nothing is listening:
+
+```bash
+npm run cli                              # interactive session
+npm run cli -- --mock                    # offline demo, no key
+npm run cli -- --yes "add a README.md"   # run one task, then exit
+```
+
+`npm run cli` works with a real key too:
+
+```bash
+PROVIDER_KEY=nvapi-... npm run cli
+```
+
+Flags:
+
+| Flag | Meaning |
+|---|---|
+| `--mock` | offline demo provider |
+| `--yes`, `-y` | auto-approve every tool call (dangerous) |
+| `--model <id>` | model to use |
+| `--root <dir>` | workspace (default `./workspace`) |
+| `--port <n>` | server port (default `4317`) |
+| `--url <base>` | use an already running server instead of spawning one |
+| `--help`, `-h` | usage |
+
+Every tool call is printed with its arguments and waits for
+`[y]es / [n]o / [a]lways`. `a` turns on auto-approve for the rest of the
+session. In one-shot mode with no TTY attached, approval cannot be asked, so
+`--yes` is required — otherwise the command exits with status 2.
+
+Inside the interactive session:
+
+| Command | Does |
+|---|---|
+| `/help` | show commands |
+| `/model [id]` | show or change the model |
+| `/files [path]` | list workspace files |
+| `/cat <path>` | print a file |
+| `/new` | clear the conversation |
+| `/exit` | leave (stops a server it started) |
+
+If the CLI starts the server, it stops it on exit. If you point it at an
+existing server with `--url`, that server is left running.
 
 ## Configuration
 
@@ -100,12 +148,13 @@ it, **Deny** returns an error to the model so it can try something else. Turn on
   output.
 - Write and shell calls require approval unless you enable auto-approve.
 - The agent has no network tool; it can only run commands you approve.
-- Nothing is persisted: closing the tab ends the conversation.
+- Nothing is persisted: closing the tab or CLI ends the conversation.
 
 ## Files
 
 ```
 server.js          HTTP server, SSE streaming, tool executor, agent prompt
+cli.js             terminal client (starts the server if needed)
 public/index.html  chat shell, workspace tree, tool cards
 public/app.js      streaming client, approval loop, file preview, markdown
 public/app.css     dark UI, responsive drawer
@@ -114,7 +163,7 @@ workspace/         the sandbox the agent works in (put your project here)
 
 ## How a turn works
 
-1. The browser posts the conversation to `/api/chat`.
+1. The client (browser or CLI) posts the conversation to `/api/chat`.
 2. The server streams the model reply, holding back ` ```tool ` blocks.
 3. Text arrives as `delta` events; a completed block becomes a `tool` event.
 4. The UI shows the tool card and waits.
@@ -126,6 +175,7 @@ workspace/         the sandbox the agent works in (put your project here)
 
 - One tool call per model turn (keeps approvals explicit and the loop simple).
 - Text-only tools: no image input, no browser automation.
-- Conversation state lives in the tab; a reload starts fresh.
+- Conversation state lives in the client; a reload (or a new CLI run) starts
+  fresh.
 - Models are imperfect at the tool format. If one ignores it, try a stronger
   instruct/coder model or restate the task.
