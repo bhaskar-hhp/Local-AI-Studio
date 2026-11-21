@@ -43,24 +43,65 @@ No browser needed. `cli.js` drives the same agent over the local API, and starts
 the server itself when nothing is listening:
 
 ```bash
-npm run cli                              # interactive session
-npm run cli -- --mock                    # offline demo, no key
-npm run cli -- --yes "add a README.md"   # run one task, then exit
+npm run cli                                    # interactive session
+npm run cli -- --mock                          # offline demo, no key
+npm run cli -- --key nvapi-...                 # save the key once, then chat
+npm run cli -- --list-models                   # show every provider model
+npm run cli -- --yes "add a README.md"         # run one task, then exit
 ```
 
-`npm run cli` works with a real key too:
+### Provider key
+
+The first time you run `npm run cli` without a key, it asks for one (input is
+hidden) and saves it. You can also supply it explicitly:
 
 ```bash
-PROVIDER_KEY=nvapi-... npm run cli
+npm run cli -- --key nvapi-xxxxxxxx
+PROVIDER_KEY=nvapi-xxxxxxxx npm run cli
 ```
+
+Precedence is `--key` → `PROVIDER_KEY` / `NVIDIA_API_KEY` → saved config.
+Keys are stored in
+
+```
+~/.config/local-ai-studio/config.json     (mode 600)
+```
+
+Change it later with the `/key <value>` command, or delete that file to forget
+it. If you point at an existing server with `--url`, that server's environment
+holds the key, so the CLI cannot change it for you.
+
+### Models
+
+The model list comes from the provider's `GET /models`, so it includes every
+model your key can use — for NVIDIA NIM, the whole catalogue:
+
+```bash
+npm run cli -- --list-models
+```
+
+Inside the session:
+
+```
+/models                 list all models (numbered)
+/models kimi            filter by name
+/model 12               switch to model #12
+/model moonshotai/...   switch by id
+```
+
+The current model is marked `*`; a choice made with `/model` is saved and reused
+next time. `--model <id>` (or `--model 12`) overrides it for a single run.
 
 Flags:
 
 | Flag | Meaning |
 |---|---|
+| `--key <key>` | provider API key (saved to the config file) |
+| `--base <url>` | OpenAI-compatible base URL (saved) |
+| `--list-models` | print provider models and exit |
 | `--mock` | offline demo provider |
 | `--yes`, `-y` | auto-approve every tool call (dangerous) |
-| `--model <id>` | model to use |
+| `--model <id>` | model to use (or pick a number from `/models`) |
 | `--root <dir>` | workspace (default `./workspace`) |
 | `--port <n>` | server port (default `4317`) |
 | `--url <base>` | use an already running server instead of spawning one |
@@ -76,7 +117,9 @@ Inside the interactive session:
 | Command | Does |
 |---|---|
 | `/help` | show commands |
-| `/model [id]` | show or change the model |
+| `/models [filter]` | list available models |
+| `/model [n\|id]` | show or change the model (saved) |
+| `/key [value]` | show, set or replace the provider key |
 | `/files [path]` | list workspace files |
 | `/cat <path>` | print a file |
 | `/new` | clear the conversation |

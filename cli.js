@@ -18,12 +18,49 @@
  * and stops it again on exit.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import {
+  readFileSync, writeFileSync, mkdirSync, chmodSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/* ----------------------------------------------------------------- config */
+
+const CONFIG_DIR = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+  "local-ai-studio",
+);
+const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+
+function loadConfig() {
+  try {
+    const raw = readFileSync(CONFIG_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveConfig(patch) {
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    const next = { ...loadConfig(), ...patch };
+    writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+    try { chmodSync(CONFIG_FILE, 0o600); } catch {}
+    return true;
+  } catch (err) {
+    console.error(`  could not save ${CONFIG_FILE}: ${err.message}`);
+    return false;
+  }
+}
+
+const config = loadConfig();
 
 /* ------------------------------------------------------------------- args */
 
@@ -31,7 +68,10 @@ const argv = process.argv.slice(2);
 const opts = {
   mock: false,
   yes: false,
-  model: process.env.MODEL || "",
+  key: "",
+  base: "",
+  listModels: false,
+  model: process.env.MODEL || config.model || "",
   root: process.env.AGENT_ROOT || path.join(HERE, "workspace"),
   port: Number(process.env.PORT || 4317),
   url: "",
@@ -42,6 +82,9 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--mock") opts.mock = true;
   else if (a === "--yes" || a === "-y") opts.yes = true;
+  else if (a === "--key") opts.key = argv[++i] || "";
+  else if (a === "--base") opts.base = argv[++i] || "";
+  else if (a === "--list-models") opts.listModels = true;
   else if (a === "--model") opts.model = argv[++i] || "";
   else if (a === "--root") opts.root = path.resolve(argv[++i] || ".");
   else if (a === "--port") opts.port = Number(argv[++i] || 4317);
@@ -52,10 +95,31 @@ for (let i = 0; i < argv.length; i++) {
   else opts.task.push(a);
 }
 
+// Key precedence: --key > environment > saved config.
+let KEY = opts.key
+  || process.env.PROVIDER_KEY
+  || process.env.NVIDIA_API_KEY
+  || config.key
+  || "";
+let KEY_SOURCE = opts.key ? "--key"
+  : (process.env.PROVIDER_KEY || process.env.NVIDIA_API_KEY) ? "environment"
+  : config.key ? CONFIG_FILE
+  : "none";
+
+const BASE = opts.base || process.env.PROVIDER_BASE || config.base || "";
+
 if (opts.mock) process.env.MOCK = "1";
 if (opts.root) process.env.AGENT_ROOT = opts.root;
 process.env.PORT = String(opts.port);
 if (opts.model) process.env.MODEL = opts.model;
+if (BASE) process.env.PROVIDER_BASE = BASE;
+if (KEY && !opts.mock) process.env.PROVIDER_KEY = KEY;
+
+function maskKey(k) {
+  if (!k) return "(not set)";
+  if (k.length <= 12) return k.slice(0, 2) + "…" + k.slice(-2);
+  return k.slice(0, 7) + "…" + k.slice(-4);
+}
 
 function printHelp() {
   console.log(`Local AI Studio — terminal client
@@ -63,11 +127,15 @@ function printHelp() {
 Usage
   npm run cli                         interactive session
   npm run cli -- "task description"   run one task and exit
+  npm run cli -- --list-models        show provider models and exit
 
 Options
+  --key <key>       provider API key (saved to ${CONFIG_FILE})
+  --base <url>      provider base URL (OpenAI-compatible)
+  --list-models     list every model the provider advertises
   --mock            offline demo provider (no key)
   --yes, -y         auto-approve tool calls
-  --model <id>      model id
+  --model <id>      model id (or pick a number from /models)
   --root <dir>      workspace directory
   --port <n>        server port (default 4317)
   --url <base>      use an existing server
@@ -75,7 +143,9 @@ Options
 
 Inside the session
   /help             commands
-  /model [id]       show or set the model
+  /models [filter]  list available models
+  /model [n|id]     show or set the model (number from /models)
+  /key [value]      show, set or replace the provider key
   /files [path]     list workspace files
   /cat <path>       print a file
   /new              clear the conversation
@@ -88,6 +158,13 @@ const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
 const c = (code) => (s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : String(s));
 const cyan = c("36"), green = c("32"), yellow = c("33"), red = c("31");
 const dim = c("2"), bold = c("1");
+
+// A key supplied on the command line is persisted so it is reused next time.
+if (opts.key && !opts.mock) {
+  const patch = { key: opts.key, ...(opts.base ? { base: opts.base } : {}) };
+  if (saveConfig(patch)) console.log(dim(`  key saved to ${CONFIG_FILE}`));
+}
+if (opts.base && !opts.mock) saveConfig({ base: opts.base });
 
 /* ------------------------------------------------------------------ input */
 
@@ -127,10 +204,94 @@ function createReader() {
   };
 }
 
+/* ------------------------------------------------------------- key & models */
+
+let echoOff = false;
+
+function setEcho(on) {
+  if (process.platform === "win32" || !process.stdin.isTTY) return;
+  try {
+    execFileSync("stty", [on ? "echo" : "-echo"], { stdio: ["inherit", "ignore", "ignore"] });
+    echoOff = !on;
+  } catch {}
+}
+
+/** Read a line without echoing it to the terminal. */
+async function promptHidden(prompt) {
+  process.stdout.write(prompt);
+  setEcho(false);
+  const answer = await new Promise((resolve) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: false,
+    });
+    let got = false;
+    rl.once("line", (line) => {
+      got = true;
+      resolve(line);
+      rl.close();
+    });
+    rl.once("close", () => { if (!got) resolve(null); });
+  });
+  setEcho(true);
+  process.stdout.write("\n");
+  return answer === null ? null : answer.trim();
+}
+
+async function promptForKey() {
+  console.log(yellow("\n  No provider key found."));
+  console.log(dim("  Create one at https://build.nvidia.com → API keys."));
+  const key = await promptHidden("  Paste key (input hidden): ");
+  if (!key) {
+    console.error(red("  no key entered"));
+    return "";
+  }
+  if (saveConfig({ key })) {
+    console.log(green("  ✓ key saved") + dim(` to ${CONFIG_FILE}`));
+  }
+  return key;
+}
+
+let MODELS = [];
+let DEFAULT_MODEL = "";
+
+async function loadModels() {
+  const res = await fetch(`${base}/api/models`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  MODELS = Array.isArray(body.models) ? body.models : [];
+  DEFAULT_MODEL = body.default || DEFAULT_MODEL;
+  return MODELS;
+}
+
+function printModels(filter = "") {
+  const f = filter.toLowerCase();
+  const width = String(MODELS.length).length;
+  let shown = 0;
+  MODELS.forEach((m, i) => {
+    if (f && !m.id.toLowerCase().includes(f)) return;
+    shown++;
+    const mark = m.id === MODEL ? cyan("*") : " ";
+    console.log(`  ${mark} ${String(i + 1).padStart(width)}  ${m.id}`);
+  });
+  if (!shown) {
+    console.log(dim(`  no models${f ? ` matching "${filter}"` : ""}`));
+    return;
+  }
+  console.log(dim(`  ${shown} of ${MODELS.length} models · pick with /model <number|id>`));
+}
+
+async function currentModelList() {
+  if (!MODELS.length) await loadModels();
+  return MODELS;
+}
+
 /* ----------------------------------------------------------------- server */
 
 let base = opts.url ? opts.url.replace(/\/+$/, "") : `http://127.0.0.1:${opts.port}`;
 let child = null;
+let ownsServer = false;
 
 async function health(timeout = 700) {
   try {
@@ -161,6 +322,7 @@ async function ensureServer() {
     stdio: ["ignore", "pipe", "pipe"],
   });
   child = proc;
+  ownsServer = true;
 
   let bootLog = "";
   proc.stdout.on("data", (d) => { bootLog += d.toString(); });
@@ -188,6 +350,19 @@ function stopServer() {
     child.kill("SIGTERM");
     child = null;
   }
+  ownsServer = false;
+}
+
+/** Restart a server this process started (used after changing the key). */
+async function restartServer() {
+  if (opts.url || !ownsServer) return false;
+  stopServer();
+  for (let i = 0; i < 20; i++) {
+    if (!(await health(300))) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  await ensureServer();
+  return true;
 }
 
 /* ------------------------------------------------------------------ model */
@@ -373,9 +548,53 @@ async function repl() {
         if (cmd === "exit" || cmd === "quit") break;
         if (cmd === "help") { printHelp(); continue; }
         if (cmd === "new") { messages.length = 0; console.log(dim("  new conversation")); continue; }
+        if (cmd === "models") {
+          await currentModelList();
+          printModels(arg);
+          continue;
+        }
         if (cmd === "model") {
-          if (arg) { MODEL = arg; console.log(dim(`  model ${MODEL}`)); }
-          else console.log(dim(`  model ${MODEL}`));
+          if (!arg) {
+            console.log(dim(`  model ${MODEL || "(none)"}`));
+            console.log(dim(`  ${MODELS.length ? `${MODELS.length} models known — /models to list` : "run /models to list models"}`));
+            continue;
+          }
+          const n = Number(arg);
+          if (Number.isInteger(n) && n > 0) {
+            const list = await currentModelList();
+            const pick = list[n - 1];
+            if (!pick) throw new Error(`no model #${n} (valid: 1-${list.length})`);
+            MODEL = pick.id;
+          } else {
+            MODEL = arg;
+          }
+          saveConfig({ model: MODEL });
+          console.log(dim(`  model ${MODEL}`) + dim(" (saved)"));
+          continue;
+        }
+        if (cmd === "key") {
+          if (!arg) {
+            console.log(dim(`  key ${maskKey(KEY)}`) + dim(` · source: ${KEY_SOURCE}`));
+            console.log(dim(`  config ${CONFIG_FILE}`));
+            continue;
+          }
+          KEY = arg;
+          KEY_SOURCE = "session";
+          process.env.PROVIDER_KEY = KEY;
+          saveConfig({ key: KEY });
+          MODELS = [];
+          console.log(green("  ✓ key updated") + dim(` (${maskKey(KEY)})`));
+          if (opts.url || !ownsServer) {
+            console.log(yellow("  the running server keeps its own key — restart it to apply"));
+          } else {
+            console.log(dim("  restarting the local server…"));
+            await restartServer();
+            try { await loadModels(); } catch {}
+            const hh = await health();
+            console.log(hh?.has_key
+              ? dim(`  server ready · ${hh.mock ? "mock" : "key ok"}`)
+              : yellow("  server still has no key"));
+          }
           continue;
         }
         if (cmd === "files") {
@@ -412,34 +631,83 @@ async function repl() {
 /* ------------------------------------------------------------------- main */
 
 process.on("SIGINT", () => {
+  if (echoOff) setEcho(true);
   stopServer();
   console.log("");
   process.exit(130);
 });
-process.on("exit", stopServer);
+process.on("exit", () => {
+  if (echoOff) setEcho(true);
+  stopServer();
+});
+
+// A server we spawn needs the key before it starts. Prompt for one on a TTY;
+// otherwise fail with instructions rather than starting a useless server.
+if (!opts.mock && !opts.url && !KEY) {
+  if (process.stdin.isTTY) {
+    KEY = await promptForKey();
+    if (!KEY) {
+      stopServer();
+      process.exit(1);
+    }
+    process.env.PROVIDER_KEY = KEY;
+    KEY_SOURCE = "session";
+  } else {
+    console.error(red("\n  No provider key."));
+    console.error(dim("  Pass --key <key>, set PROVIDER_KEY / NVIDIA_API_KEY, or use --mock."));
+    process.exit(1);
+  }
+}
 
 const h = await ensureServer();
+base = opts.url ? base : `http://127.0.0.1:${opts.port}`;
 
 if (h.mock) console.log(yellow("\n  mock provider — replies are scripted"));
 if (!h.has_key) {
-  console.error(red("\n  No model key. Start with PROVIDER_KEY=… or use --mock."));
+  console.error(red("\n  The server has no model key."));
+  console.error(dim(opts.url
+    ? `  Restart ${base} with PROVIDER_KEY=… and try again.`
+    : "  Pass --key <key> or set PROVIDER_KEY."));
   stopServer();
   process.exit(1);
 }
-
-base = opts.url ? base : `http://127.0.0.1:${opts.port}`;
-
-let models = [];
-try {
-  const res = await fetch(`${base}/api/models`);
-  const body = await res.json();
-  models = body.models || [];
-  if (!opts.model) MODEL = body.default || models[0]?.id || "";
-} catch {
-  MODEL = opts.model || h.model;
+if (!h.mock) {
+  console.log(dim(`  key ${maskKey(KEY || "server-side")} · ${KEY_SOURCE}`));
+  console.log(dim(`  provider ${h.provider}`));
 }
-if (opts.model) MODEL = opts.model;
-if (!MODEL) MODEL = h.model;
+
+try {
+  await loadModels();
+} catch (err) {
+  console.log(yellow(`  could not load models: ${err.message}`));
+}
+
+if (opts.model && /^\d+$/.test(opts.model)) {
+  const pick = MODELS[Number(opts.model) - 1];
+  if (!pick) {
+    console.error(red(`  no model #${opts.model} (valid: 1-${MODELS.length})`));
+    stopServer();
+    process.exit(1);
+  }
+  MODEL = pick.id;
+} else if (opts.model) {
+  MODEL = opts.model;
+} else if (MODELS.some((m) => m.id === DEFAULT_MODEL)) {
+  MODEL = DEFAULT_MODEL;
+} else {
+  MODEL = MODELS[0]?.id || DEFAULT_MODEL || h.model;
+}
+
+if (opts.listModels) {
+  if (!MODELS.length) {
+    console.error(red("  no models available — check the key and provider URL"));
+    stopServer();
+    process.exit(1);
+  }
+  printModels("");
+  stopServer();
+  process.exit(0);
+}
 
 if (opts.task.length) {
   // one-shot: interactive approval if a TTY is attached, otherwise --yes is required
