@@ -96,6 +96,27 @@ Change it later with the `/key <value>` command, or delete that file to forget
 it. If you point at an existing server with `--url`, that server's environment
 holds the key, so the CLI cannot change it for you.
 
+### Keep everything inside the workspace
+
+By default the saved key/model config lives at
+`~/.config/local-ai-studio/config.json`. If you want nothing written outside the
+workspace folder, point the config file into the workspace:
+
+```bash
+npm run cli -- --key nvapi-... --config ./workspace/config.json
+LOCAL_AI_STUDIO_CONFIG=./workspace/config.json npm run cli -- --list-models
+```
+
+On the next run, reuse it:
+
+```bash
+npm run cli -- --config ./workspace/config.json
+```
+
+The agent itself only ever touches `AGENT_ROOT` (default `./workspace`) —
+`server.js` rejects any path that escapes it, and `cli.js` writes nothing
+else. There are no npm dependencies and no global installs.
+
 ### Models
 
 The model list comes from the provider's `GET /models`, so it includes every
@@ -123,6 +144,7 @@ Flags:
 |---|---|
 | `--key <key>` | provider API key (saved to the config file) |
 | `--base <url>` | OpenAI-compatible base URL (saved) |
+| `--config <path>` | config file for saved key/model (default `~/.config/local-ai-studio/config.json`) |
 | `--list-models` | print provider models and exit |
 | `--mock` | offline demo provider |
 | `--yes`, `-y` | auto-approve every tool call (dangerous) |
@@ -134,8 +156,12 @@ Flags:
 
 Every tool call is printed with its arguments and waits for
 `[y]es / [n]o / [a]lways`. `a` turns on auto-approve for the rest of the
-session. In one-shot mode with no TTY attached, approval cannot be asked, so
-`--yes` is required — otherwise the command exits with status 2.
+session.
+
+- **With a TTY:** each tool call prompts interactively; pass `--yes` to skip prompts.
+- **Headless (no TTY):** one-shot mode auto-approves all tool calls, so it runs
+  autonomously like OpenCode. Pass `--yes` to silence the warning, or pipe
+  responses for interactive approval: `printf 'y\n' | node cli.js -- "task"`.
 
 Inside the interactive session:
 

@@ -31,11 +31,17 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /* ----------------------------------------------------------------- config */
 
-const CONFIG_DIR = path.join(
-  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
-  "local-ai-studio",
-);
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+function defaultConfigFile() {
+  const env = process.env.LOCAL_AI_STUDIO_CONFIG;
+  if (env) return path.resolve(env);
+  const dir = path.join(
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+    "local-ai-studio",
+  );
+  return path.join(dir, "config.json");
+}
+
+let CONFIG_FILE = defaultConfigFile();
 
 function loadConfig() {
   try {
@@ -49,7 +55,8 @@ function loadConfig() {
 
 function saveConfig(patch) {
   try {
-    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    const dir = path.dirname(CONFIG_FILE);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const next = { ...loadConfig(), ...patch };
     writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
     try { chmodSync(CONFIG_FILE, 0o600); } catch {}
@@ -60,8 +67,7 @@ function saveConfig(patch) {
   }
 }
 
-const config = loadConfig();
-
+let config = loadConfig();
 /* ------------------------------------------------------------------- args */
 
 const argv = process.argv.slice(2);
@@ -84,6 +90,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--yes" || a === "-y") opts.yes = true;
   else if (a === "--key") opts.key = argv[++i] || "";
   else if (a === "--base") opts.base = argv[++i] || "";
+  else if (a === "--config") { CONFIG_FILE = path.resolve(argv[++i] || ""); config = loadConfig(); }
   else if (a === "--list-models") opts.listModels = true;
   else if (a === "--model") opts.model = argv[++i] || "";
   else if (a === "--root") opts.root = path.resolve(argv[++i] || ".");
@@ -132,6 +139,7 @@ Usage
 Options
   --key <key>       provider API key (saved to ${CONFIG_FILE})
   --base <url>      provider base URL (OpenAI-compatible)
+  --config <path>   config file for saved key/model (default ~/.config/local-ai-studio/config.json)
   --list-models     list every model the provider advertises
   --mock            offline demo provider (no key)
   --yes, -y         auto-approve tool calls
@@ -149,7 +157,12 @@ Inside the session
   /files [path]     list workspace files
   /cat <path>       print a file
   /new              clear the conversation
-  /exit             leave`);
+  /exit             leave
+
+Headless (no TTY): one-shot mode auto-approves all tool calls. On a TTY, each
+tool call prompts [y]es / [n]o / [a]lways. Pipe responses for interactive
+approval: printf 'y\n' | node cli.js -- "task";
+`);
 }
 
 /* ------------------------------------------------------------------ color */
@@ -710,13 +723,12 @@ if (opts.listModels) {
 }
 
 if (opts.task.length) {
-  // one-shot: interactive approval if a TTY is attached, otherwise --yes is required
+  // one-shot: interactive approval on a TTY; auto-approve headless (like OpenCode).
   const oneShot = opts.task.join(" ");
   if (!AUTO && !process.stdin.isTTY) {
-    console.error(red("\n  One-shot mode needs --yes (no terminal to ask for approval)."));
-    console.error(dim("  Example: npm run cli -- --yes \"create hello.txt\""));
-    stopServer();
-    process.exit(2);
+    AUTO = true;
+    console.error(yellow("\n  Headless mode: auto-approving all tool calls."));
+    console.error(dim("  Pass --yes to silence this warning, or pipe responses for interactive approval."));
   }
   if (!AUTO) ioRef = createReader();
   try {
